@@ -14,7 +14,7 @@
 -export([mk_req/7]). %% useful when testing.
 
 %% Exported for looping with a fully-qualified module name
--export([accept/4, handle_request/4, chunk_loop/1, split_args/1,
+-export([accept/4, handle_request/4, chunk_loop/1, stream_loop/1, split_args/1,
          parse_path/1, keepalive_loop/3, keepalive_loop/5]).
 
 
@@ -90,10 +90,11 @@ handle_request(S, PrevB, Opts, {Mod, Args} = Callback) ->
 
         {chunk, UserHeaders, Initial} ->
             t(user_end),
-
+            
             ResponseHeaders = [{<<"Transfer-Encoding">>, <<"chunked">>},
                                connection(Req, UserHeaders)
                                | UserHeaders],
+
             send_response(S, Method, 200, ResponseHeaders, <<"">>, Callback),
             Initial =:= <<"">> orelse send_chunk(S, Initial),
 
@@ -104,6 +105,26 @@ handle_request(S, PrevB, Opts, {Mod, Args} = Callback) ->
 
             t(request_end),
             handle_event(Mod, chunk_complete,
+                         [Req, 200, ResponseHeaders, ClosingEnd, get_timings()],
+                         Args),
+            {close, <<>>};
+            
+        {stream, UserHeaders, Initial} ->
+            t(user_end),
+            
+            ResponseHeaders = [connection(Req, UserHeaders)
+                               | UserHeaders],
+
+            send_response(S, Method, 200, ResponseHeaders, <<"">>, Callback),
+            Initial =:= <<"">> orelse send_stream_part(S, Initial),
+
+            ClosingEnd = case start_stream_loop(S) of
+                             {error, client_closed} -> client;
+                             ok -> server
+                         end,
+
+            t(request_end),
+            handle_event(Mod, stream_complete,
                          [Req, 200, ResponseHeaders, ClosingEnd, get_timings()],
                          Args),
             {close, <<>>};
@@ -213,6 +234,8 @@ execute_callback(Req, {Mod, Args}) ->
         {ok, Body}                            -> {response, 200, [], Body};
         {chunk, Headers}                      -> {chunk, Headers, <<"">>};
         {chunk, Headers, Initial}             -> {chunk, Headers, Initial};
+        {stream, Headers}                     -> {stream, Headers, <<"">>};
+        {stream, Headers, Initial}            -> {stream, Headers, Initial};
         {HttpCode, Headers, {file, Filename}} ->
             {file, HttpCode, Headers, Filename, {0, 0}};
         {HttpCode, Headers, {file, Filename, Range}} ->
@@ -302,6 +325,48 @@ send_chunk(Socket, Data) ->
     Size = integer_to_list(iolist_size(Data), 16),
     Response = [Size, <<"\r\n">>, Data, <<"\r\n">>],
     gen_tcp:send(Socket, Response).
+    
+
+%% @doc: The chunk loop is an intermediary between the socket and the
+%% user. We forward anything the user sends until the user sends an
+%% empty response, which signals that the connection should be
+%% closed. When the client closes the socket, the loop exits.
+start_stream_loop(Socket) ->
+    %% Set the socket to active so we receive the tcp_closed message
+    %% if the client closes the connection
+    inet:setopts(Socket, [{active, once}]),
+    ?MODULE:stream_loop(Socket).
+
+stream_loop(Socket) ->
+    receive
+        {tcp_closed, Socket} ->
+            {error, client_closed};
+
+        {stream, <<>>} ->
+            gen_tcp:close(Socket),
+            ok;
+        {stream, <<>>, From} ->
+            gen_tcp:close(Socket),
+            From ! {self(), ok},
+            ok;
+
+        {stream, Data} ->
+            send_stream_part(Socket, Data),
+            ?MODULE:stream_loop(Socket);
+        {stream, Data, From} ->
+            case send_stream_part(Socket, Data) of
+                ok ->
+                    From ! {self(), ok};
+                {error, closed} ->
+                    From ! {self(), {error, closed}}
+            end,
+            ?MODULE:stream_loop(Socket)
+    after 10000 ->
+            ?MODULE:stream_loop(Socket)
+    end.
+    
+send_stream_part(Socket, Data) ->
+    gen_tcp:send(Socket, Data).
 
 
 %%

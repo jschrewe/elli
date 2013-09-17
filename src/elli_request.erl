@@ -6,6 +6,9 @@
          , async_send_chunk/2
          , chunk_ref/1
          , close_chunk/1
+         , send_stream_part/2
+         , async_send_stream_part/2
+         , close_stream/1
          , path/1
          , raw_path/1
          , query_str/1
@@ -174,6 +177,15 @@ close_chunk(Ref) ->
 async_send_chunk(Ref, Data) ->
     Ref ! {chunk, Data}.
 
+%% @doc: Explicitly close the chunked connection. Returns {error,
+%% closed} if the client already closed the connection.
+close_stream(Ref) ->
+    send_stream_part(Ref, <<"">>).
+
+%% @doc: Sends a chunk asynchronously
+async_send_stream_part(Ref, Data) ->
+    Ref ! {stream, Data}.
+
 %% @doc: Sends a chunk synchronously, if the refrenced process is dead
 %% returns early with {error, closed} instead of timing out.
 send_chunk(Ref, Data) ->
@@ -192,6 +204,28 @@ send_chunk(Ref, Data, Timeout) ->
     after Timeout ->
             {error, timeout}
     end.
+
+%% @doc: Sends a stream part synchronously, if the refrenced process is dead
+%% returns early with {error, closed} instead of timing out.
+send_stream_part(Ref, Data) ->
+    case is_ref_alive(Ref) of
+        false -> {error, closed};
+        true  -> 
+            send_stream_part(Ref, Data, 5000)
+    end.
+
+send_stream_part(Ref, Data, Timeout) ->
+    Ref ! {stream, Data, self()},
+    receive
+        {Ref, ok} ->
+            ok;
+        {Ref, {error, Reason}} ->
+            {error, Reason}
+    after Timeout ->
+            {error, timeout}
+    end.
+
+
 
 is_ref_alive(Ref) ->
     case node(Ref) =:= node() of
