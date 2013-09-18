@@ -211,7 +211,7 @@ send_stream_part(Ref, Data) ->
     case is_ref_alive(Ref) of
         false -> {error, closed};
         true  -> 
-            send_stream_part(Ref, Data, 5000)
+            send_stream_part(Ref, Data, infinity)
     end.
 
 send_stream_part(Ref, Data, Timeout) ->

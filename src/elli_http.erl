@@ -75,9 +75,15 @@ handle_request(S, PrevB, Opts, {Mod, Args} = Callback) ->
         {response, ResponseCode, UserHeaders, UserBody} ->
             t(user_end),
 
-            ResponseHeaders = [connection(Req, UserHeaders),
-                               content_length(UserHeaders, UserBody)
-                               | UserHeaders],
+            Headers = [connection(Req, UserHeaders) | UserHeaders],
+            
+            ResponseHeaders = case ResponseCode of
+                304 ->
+                    Headers;
+                _ ->
+                    [content_length(UserHeaders, UserBody) | Headers]
+            end,
+                
             send_response(S, Method, ResponseCode,
                           ResponseHeaders, UserBody, Callback),
 
@@ -109,13 +115,13 @@ handle_request(S, PrevB, Opts, {Mod, Args} = Callback) ->
                          Args),
             {close, <<>>};
             
-        {stream, UserHeaders, Initial} ->
+        {stream, ResponseCode, UserHeaders, Initial} ->
             t(user_end),
             
             ResponseHeaders = [connection(Req, UserHeaders)
                                | UserHeaders],
 
-            send_response(S, Method, 200, ResponseHeaders, <<"">>, Callback),
+            send_response(S, Method, ResponseCode, ResponseHeaders, <<"">>, Callback),
             Initial =:= <<"">> orelse send_stream_part(S, Initial),
 
             ClosingEnd = case start_stream_loop(S) of
@@ -234,8 +240,8 @@ execute_callback(Req, {Mod, Args}) ->
         {ok, Body}                            -> {response, 200, [], Body};
         {chunk, Headers}                      -> {chunk, Headers, <<"">>};
         {chunk, Headers, Initial}             -> {chunk, Headers, Initial};
-        {stream, Headers}                     -> {stream, Headers, <<"">>};
-        {stream, Headers, Initial}            -> {stream, Headers, Initial};
+        {stream, Headers}                     -> {stream, 200, Headers, <<"">>};
+        {stream, partial, Headers}            -> {stream, 206, Headers, <<"">>};
         {HttpCode, Headers, {file, Filename}} ->
             {file, HttpCode, Headers, Filename, {0, 0}};
         {HttpCode, Headers, {file, Filename, Range}} ->
